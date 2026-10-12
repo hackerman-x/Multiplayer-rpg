@@ -10,10 +10,10 @@ var SPEED = 100.0
 var DASH = 200.0
 var BASE_SPEED = 100.0
 var LUNGE_SPEED = 250.0
+var BLOCK_SPEED_MULTIPLIER = 0.5
 
 var OFFENSIVE_DURATION = 0.4   # lock time for lunge attacks
 var NORMAL_DURATION = 0.001     # lock time for quick basic slashes
-var DEFENSIVE_DURATION = 0.2   # lock time for defensive/block moves
 var HOLD_DURATION = 0.4        # how long you must hold attack before the charged (Stab) attack fires
 
 var move_map = {
@@ -54,6 +54,7 @@ var moves = []
 var attacking := false
 var defending := false
 var lunging := false
+var blocking := false
 var lunge_direction := Vector2.ZERO
 
 # charge tracking for hold-to-lunge
@@ -87,6 +88,7 @@ func is_local_player() -> bool:
 
 func _ready() -> void:
 	Global.player = self
+	$Shield.visible = false
 	if str(name) == "1":
 		$Label.text = "Host"
 	else:
@@ -114,6 +116,8 @@ func _physics_process(_delta: float) -> void:
 	
 	if lunging:
 		velocity = lunge_direction * LUNGE_SPEED
+	elif blocking:
+		velocity = Vector2(direction_x, direction_y) * SPEED * BLOCK_SPEED_MULTIPLIER
 	elif attacking:
 		velocity.x = move_toward(velocity.x, 0, SPEED)
 		velocity.y = move_toward(velocity.y, 0, SPEED)
@@ -133,17 +137,23 @@ func _physics_process(_delta: float) -> void:
 	else:
 		$Attack.look_at(get_global_mouse_position())
 		$HitBoxNode.look_at(get_global_mouse_position())
-		apply_facing.rpc(get_aim_direction())
+		if blocking:
+			set_shield_angle.rpc((get_global_mouse_position() - global_position).angle())
+
+	apply_facing.rpc(body_animation())
 
 	if Input.is_action_just_pressed("Dash"):
 		$DashTimer.start()
 		SPEED = DASH
 		$GPUParticles2D.emitting = true
 	
-	handle_attack_input()
-	
+	if not blocking:
+		handle_attack_input()
+
 	if Input.is_action_just_pressed("block"):
 		handle_block()
+	elif blocking and not Input.is_action_pressed("block"):
+		stop_block()
 
 
 
@@ -190,15 +200,41 @@ func can_act() -> bool:
 
 
 func handle_block() -> void:
-	if not can_act(): return
-	var move_dir = get_movement_direction()
-	var aim_dir = get_aim_direction()
-	var expected_aim = opposite_direction(move_dir)
-	
-	if aim_dir == expected_aim and defensive_map.has(move_dir):
-		var move_name = defensive_map[move_dir]
-		play_animation.rpc(move_name)
-		register_move(move_name, true, DEFENSIVE_DURATION)
+	if blocking or not can_act(): return
+	var aim := get_global_mouse_position() - global_position
+
+	blocking = true
+	attacking = true
+	defending = true
+	charging = false
+	block_area.monitoring = true
+	$AttackTimer.stop()
+	aim_locked = false
+	track_combo(defensive_map[opposite_direction(dir_from_vector(aim))])
+	set_shield_angle.rpc(aim.angle())
+	play_animation.rpc("BlockStart")
+
+
+func stop_block() -> void:
+	blocking = false
+	attacking = false
+	defending = false
+	block_area.monitoring = false
+	cooldown_end = Time.get_ticks_msec() / 1000.0 + ATTACK_COOLDOWN
+	end_block_visuals.rpc()
+
+
+@rpc("call_local", "unreliable_ordered")
+func set_shield_angle(angle: float) -> void:
+	$Shield.global_rotation = angle
+
+
+@rpc("call_local")
+func end_block_visuals() -> void:
+	aim_locked = false
+	anim_player.stop()
+	$Shield.visible = false
+	$Shield/CollisionShape2D.set_deferred("disabled", true)
 
 
 
@@ -210,18 +246,6 @@ func opposite_direction(dir: String) -> String:
 		"right": return "left"
 	return ""
 
-
-
-func get_movement_direction() -> String:
-	var direction_x := Input.get_axis("left", "right")
-	var direction_y := Input.get_axis("up", "down")
-	
-	if direction_x == 0 and direction_y == 0:
-		return "none"
-	elif abs(direction_x) > abs(direction_y):
-		return "right" if direction_x > 0 else "left"
-	else:
-		return "down" if direction_y > 0 else "up"
 
 
 
@@ -241,12 +265,14 @@ func dir_from_vector(v: Vector2) -> String:
 func register_move(move_name: String, is_defensive: bool, duration: float) -> void:
 	if not can_act(): return
 	cooldown_end = Time.get_ticks_msec() / 1000.0 + duration + ATTACK_COOLDOWN
+	track_combo(move_name)
+	perform_attack(move_name, is_defensive, duration)
 
+
+func track_combo(move_name: String) -> void:
 	moves.append(move_name)
 	$Timer.start()
-	
-	perform_attack(move_name, is_defensive, duration)
-	
+
 	if combos.has(moves) and moves.size() > 1:
 		var _combo_name = combos[moves]
 	
@@ -278,21 +304,18 @@ func perform_attack(move_name: String, is_defensive: bool, duration: float) -> v
 		lunge_direction = lunge_moves[move_name]
 
 	if not is_defensive:
-		play_animation.rpc(move_name)
+		play_animation.rpc(anim_for_move(move_name))
+
+
+func anim_for_move(move_name: String) -> String:
+	match move_name:
+		"Forward Overhead", "South Slash", "Forward Lunge Left", "Forward Lunge Right":
+			return "Stab"
+	return "Slash"
 
 
 @rpc("call_local")
-func play_animation(move_name: String) -> void:
-	var anim_name = "Slash"
-
-	match move_name:
-		"Jodan Slice", "Gedan Slice", "Side Slash Left", "Side Slash Right":
-			anim_name = "Slash"
-		"Forward Overhead", "South Slash", "Forward Lunge Left", "Forward Lunge Right":
-			anim_name = "Stab"
-		"Left-Defensive", "Right-Defensive", "Up-Defensive", "Down-Defensive":
-			anim_name = "Block"
-
+func play_animation(anim_name: String) -> void:
 	if $Attack.sprite_frames.has_animation(anim_name):
 		$Attack.animation = anim_name
 	anim_player.play(anim_name)
@@ -309,21 +332,25 @@ func lock_aim(angle: float) -> void:
 	apply_facing(locked_aim_dir)
 
 
-func _on_animation_finished(_anim_name: StringName) -> void:
+func _on_animation_finished(anim_name: StringName) -> void:
+	if blocking:
+		if anim_name == &"BlockStart" or anim_name == &"Blocking":
+			play_animation.rpc("Blocking")
+		return
 	aim_locked = false
 
 
+func body_animation() -> String:
+	if velocity.x < -1.0:
+		return "leftanimated"
+	if velocity.x > 1.0:
+		return "rightanimated"
+	return get_aim_direction()
+
+
 @rpc("call_local")
-func apply_facing(direction: String) -> void:
-	match direction:
-		"left":
-			sprite.play("left")
-		"right":
-			sprite.play("right")
-		"up":
-			sprite.play("up")
-		"down":
-			sprite.play("down")
+func apply_facing(anim_name: String) -> void:
+	sprite.play(anim_name)
 
 
 @rpc("any_peer", "call_local")
