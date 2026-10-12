@@ -341,11 +341,11 @@ func _on_animation_finished(anim_name: StringName) -> void:
 
 
 func body_animation() -> String:
-	if velocity.x < -1.0:
-		return "leftanimated"
-	if velocity.x > 1.0:
-		return "rightanimated"
-	return get_aim_direction()
+	var facing := get_aim_direction()
+	var walk_anim := facing + "animated"
+	if velocity.length() > 1.0 and sprite.sprite_frames.has_animation(walk_anim):
+		return walk_anim
+	return facing
 
 
 @rpc("call_local")
