@@ -51,9 +51,11 @@ var lunge_moves = {
 var combos = {
 	["Jodan Slice"]: "Jodan Slice",
 	["Gedan Slice"]: "Gedan Slice",
-	["Down-Defensive", "Forward Overhead"]: "Counter Attack"
+	["Down-Defensive", "Forward Overhead"]: "Counter Attack",
+	["Up-Defensive", "South Slash"]: "Counter Attack",
+	["Left-Defensive", "Forward Lunge Right"]: "Counter Attack",
+	["Right-Defensive", "Forward Lunge Left"]: "Counter Attack",
 }
-
 var moves = []
 var attacking := false
 var defending := false
@@ -80,6 +82,17 @@ var ATTACK_COOLDOWN = 0.1
 var cooldown_end := 0.0
 var HIT_EFFECT_RADIUS = 8.0   # how far from the victim's center the hit sparks appear
 var BLOCK_ARC_DEGREES = 60.0  # hits within this many degrees either side of the shield's facing are blocked
+
+# How hard each attack pushes the player it hits (starting push speed in pixels/second)
+var KNOCKBACK = {
+	"Slash": 150.0,
+	"Thrust": 250.0,
+	"Stab": 400.0,    # the lunge
+	"Smash": 600.0,
+}
+var KNOCKBACK_FRICTION = 1200.0   # how quickly a push slows down; higher = shorter slide
+var knockback_velocity := Vector2.ZERO
+var current_attack := ""          # animation name of the attack we're doing right now
 
 
 func _enter_tree() -> void:
@@ -117,7 +130,7 @@ func _unhandled_input(_event: InputEvent) -> void:
 
 
 
-func _physics_process(_delta: float) -> void:
+func _physics_process(delta: float) -> void:
 	if not is_local_player(): return
 	var direction := Input.get_vector("left", "right", "up", "down")
 
@@ -133,7 +146,12 @@ func _physics_process(_delta: float) -> void:
 	else:
 		velocity.x = move_toward(velocity.x, 0, SPEED)
 		velocity.y = move_toward(velocity.y, 0, SPEED)
-	
+
+	# Being knocked back overrides your own movement until the push dies down
+	if knockback_velocity != Vector2.ZERO:
+		velocity = knockback_velocity
+		knockback_velocity = knockback_velocity.move_toward(Vector2.ZERO, KNOCKBACK_FRICTION * delta)
+
 	move_and_slide()
 
 	if aim_locked:
@@ -326,7 +344,8 @@ func perform_attack(move_name: String, is_defensive: bool, duration: float) -> v
 		lunge_direction = lunge_moves[move_name]
 
 	if not is_defensive:
-		play_animation.rpc(anim_for_move(move_name))
+		current_attack = anim_for_move(move_name)
+		play_animation.rpc(current_attack)
 
 
 func anim_for_move(move_name: String) -> String:
@@ -398,11 +417,12 @@ func shake_camera() -> void:
 
 
 @rpc("any_peer")
-func recieve_damage(hit_pos: Vector2) -> void:
+func recieve_damage(hit_pos: Vector2, knockback: Vector2) -> void:
 	var tween = create_tween()
 	if is_hit_blocked(hit_pos):
 		block_effect.rpc(hit_pos)
 		return
+	knockback_velocity = knockback
 	health -= 1
 	tween.tween_property(healthbar, "value", health, 0.3)
 	flash_white.rpc(hit_pos)
@@ -410,6 +430,7 @@ func recieve_damage(hit_pos: Vector2) -> void:
 	if health <= 0:
 		health = 3
 		position = Vector2.ZERO
+		knockback_velocity = Vector2.ZERO
 		tween.tween_property(healthbar, "value", 5, 0.3)
 		
 	
@@ -480,4 +501,7 @@ func _on_hit_box_node_body_entered(body: Node2D) -> void:
 	# The spot on the victim's edge facing our sword's hitbox
 	var to_sword: Vector2 = $HitBoxNode/HitBox.global_position - body.global_position
 	var hit_pos: Vector2 = body.global_position + to_sword.limit_length(HIT_EFFECT_RADIUS)
-	body.recieve_damage.rpc_id(body.get_multiplayer_authority(), hit_pos)
+	# Push them straight away from us, as hard as the current attack hits
+	var push_dir := (body.global_position - global_position).normalized()
+	var knockback: Vector2 = push_dir * KNOCKBACK.get(current_attack, 0.0)
+	body.recieve_damage.rpc_id(body.get_multiplayer_authority(), hit_pos, knockback)

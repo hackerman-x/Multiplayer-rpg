@@ -1,13 +1,10 @@
 extends Node
 
 # ---------------- Connection settings ----------------
-# Where the lobby manager runs. "localhost" = this computer (for testing).
-# For the real game, set this to your droplet's domain, e.g. "game.yoursite.com".
-const SERVER_HOST := "localhost"
-# false: connect straight to the ports (ws://host:port). Use for local tests.
-# true:  connect through Caddy on the droplet (wss://host/manager, wss://host/lobby/<port>).
-#        Needed when the game page is on an https website.
-const USE_SECURE_PROXY := false
+# Exported builds (web and desktop) connect securely through Caddy on the game droplet
+# (139.59.76.134): wss://LIVE_SERVER_HOST/manager and wss://LIVE_SERVER_HOST/lobby/<port>
+# Running from the Godot editor connects to a manager on this computer: ws://localhost:<port>
+const LIVE_SERVER_HOST := "play.waitinggodot.in"
 
 const MANAGER_PORT := 9999
 const LOBBY_PORT_FIRST := 10000
@@ -263,16 +260,20 @@ func _setup_client() -> void:
 	menu_status.text = ""
 
 
+func _use_live_server() -> bool:
+	return not OS.has_feature("editor")
+
+
 func _manager_url() -> String:
-	if USE_SECURE_PROXY:
-		return "wss://%s/manager" % SERVER_HOST
-	return "ws://%s:%d" % [SERVER_HOST, MANAGER_PORT]
+	if _use_live_server():
+		return "wss://%s/manager" % LIVE_SERVER_HOST
+	return "ws://localhost:%d" % MANAGER_PORT
 
 
 func _lobby_url(port: int) -> String:
-	if USE_SECURE_PROXY:
-		return "wss://%s/lobby/%d" % [SERVER_HOST, port]
-	return "ws://%s:%d" % [SERVER_HOST, port]
+	if _use_live_server():
+		return "wss://%s/lobby/%d" % [LIVE_SERVER_HOST, port]
+	return "ws://localhost:%d" % port
 
 
 func _connect_to(url: String) -> void:
