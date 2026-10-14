@@ -5,6 +5,8 @@ extends CharacterBody2D
 @onready var anim_player: AnimationPlayer = $AnimationPlayer
 @onready var sprite: AnimatedSprite2D = $SirCrumbsBottom  # adjust path/type to match your actual sprite node
 @onready var camera: Camera2D = $Camera2D
+@onready var healthbar: ProgressBar = $ProgressBar
+@onready var combo_timer: Timer = $ComboTimer   # Thrust window, started when Slash finishes
 
 var SPEED = 100.0
 var DASH = 200.0
@@ -14,7 +16,9 @@ var BLOCK_SPEED_MULTIPLIER = 0.5
 
 var OFFENSIVE_DURATION = 0.4   # lock time for lunge attacks
 var NORMAL_DURATION = 0.001     # lock time for quick basic slashes
-var HOLD_DURATION = 0.4        # how long you must hold attack before the charged (Stab) attack fires
+var HOLD_DURATION = 0.4        # how long you hold attack (Stab lunge) or smash (Smash) before it fires
+var smash_charging := false
+var smash_start_time := 0.0
 
 var move_map = {
 	"none_up": "Jodan Slice",
@@ -63,7 +67,7 @@ var charge_direction := ""
 var charge_start_time := 0.0
 var lunge_triggered := false
 
-var health := 3
+var health := 5
 
 # aim is frozen from the moment a move fires until its animation finishes
 var aim_locked := false
@@ -74,6 +78,8 @@ var hit = false
 # shared cooldown for every attack and block (starts when the move's lock time ends)
 var ATTACK_COOLDOWN = 0.1
 var cooldown_end := 0.0
+var HIT_EFFECT_RADIUS = 8.0   # how far from the victim's center the hit sparks appear
+var BLOCK_ARC_DEGREES = 60.0  # hits within this many degrees either side of the shield's facing are blocked
 
 
 func _enter_tree() -> void:
@@ -87,6 +93,7 @@ func is_local_player() -> bool:
 
 
 func _ready() -> void:
+	healthbar.value = health
 	Global.player = self
 	$Shield.visible = false
 	if str(name) == "1":
@@ -97,10 +104,11 @@ func _ready() -> void:
 	hitbox.monitoring = false
 	block_area.monitoring = false
 	anim_player.animation_finished.connect(_on_animation_finished)
+	healthbar.visible = is_local_player()
 
 	if not is_local_player(): return
-
 	camera.make_current()
+
 
 
 
@@ -111,19 +119,17 @@ func _unhandled_input(_event: InputEvent) -> void:
 
 func _physics_process(_delta: float) -> void:
 	if not is_local_player(): return
-	var direction_x := Input.get_axis("left", "right")
-	var direction_y := Input.get_axis("up", "down")
-	
+	var direction := Input.get_vector("left", "right", "up", "down")
+
 	if lunging:
 		velocity = lunge_direction * LUNGE_SPEED
 	elif blocking:
-		velocity = Vector2(direction_x, direction_y) * SPEED * BLOCK_SPEED_MULTIPLIER
+		velocity = direction * SPEED * BLOCK_SPEED_MULTIPLIER
 	elif attacking:
 		velocity.x = move_toward(velocity.x, 0, SPEED)
 		velocity.y = move_toward(velocity.y, 0, SPEED)
-	elif direction_x or direction_y:
-		velocity.x = direction_x * SPEED
-		velocity.y = direction_y * SPEED
+	elif direction:
+		velocity = direction * SPEED
 	else:
 		velocity.x = move_toward(velocity.x, 0, SPEED)
 		velocity.y = move_toward(velocity.y, 0, SPEED)
@@ -145,7 +151,7 @@ func _physics_process(_delta: float) -> void:
 	if Input.is_action_just_pressed("Dash"):
 		$DashTimer.start()
 		SPEED = DASH
-		$GPUParticles2D.emitting = true
+		$Dash.emitting = true
 	
 	if not blocking:
 		handle_attack_input()
@@ -159,19 +165,31 @@ func _physics_process(_delta: float) -> void:
 
 func handle_attack_input() -> void:
 	var aim_dir = get_aim_direction()
+	var now := Time.get_ticks_msec() / 1000.0
+
+	if Input.is_action_just_pressed("smash"):
+		smash_charging = true
+		smash_start_time = now
+	if smash_charging and Input.is_action_pressed("smash") and now - smash_start_time >= HOLD_DURATION:
+		smash_charging = false
+		# stay rooted for the whole Smash animation
+		register_move("Smash", false, anim_player.get_animation("Smash").length)
+	if Input.is_action_just_released("smash"):
+		smash_charging = false
 
 	if Input.is_action_just_pressed("attack"):
-		if offensive_map.has(aim_dir):
-			charging = true
-			lunge_triggered = false
-			charge_direction = aim_dir
-			charge_start_time = Time.get_ticks_msec() / 1000.0
-		else:
+		if combo_timer.time_left > 0:
+			combo_timer.stop()
 			charging = false
-			fire_normal_attack(aim_dir)
+			register_move("Thrust", false, NORMAL_DURATION, true)
+			return
+		charging = true
+		lunge_triggered = false
+		charge_direction = aim_dir
+		charge_start_time = now
 
 	if charging and Input.is_action_pressed("attack"):
-		var held_time = (Time.get_ticks_msec() / 1000.0) - charge_start_time
+		var held_time = now - charge_start_time
 
 		if held_time >= HOLD_DURATION and not lunge_triggered:
 			lunge_triggered = true
@@ -189,8 +207,7 @@ func handle_attack_input() -> void:
 func fire_normal_attack(aim_dir: String) -> void:
 	var key = "none_" + aim_dir
 	if move_map.has(key):
-		var move_name = move_map[key]
-		register_move(move_name, false, NORMAL_DURATION)
+		register_move(move_map[key], false, NORMAL_DURATION)
 
 
 
@@ -262,9 +279,14 @@ func dir_from_vector(v: Vector2) -> String:
 
 
 
-func register_move(move_name: String, is_defensive: bool, duration: float) -> void:
-	if not can_act(): return
-	cooldown_end = Time.get_ticks_msec() / 1000.0 + duration + ATTACK_COOLDOWN
+func register_move(move_name: String, is_defensive: bool, duration: float, ignore_cooldown := false) -> void:
+	if not ignore_cooldown and not can_act(): return
+	# Attacks can't be interrupted: you're locked out until the animation has finished
+	var lock_time := duration
+	var anim := anim_for_move(move_name)
+	if anim_player.has_animation(anim):
+		lock_time = maxf(duration, anim_player.get_animation(anim).length)
+	cooldown_end = Time.get_ticks_msec() / 1000.0 + lock_time + ATTACK_COOLDOWN
 	track_combo(move_name)
 	perform_attack(move_name, is_defensive, duration)
 
@@ -311,6 +333,8 @@ func anim_for_move(move_name: String) -> String:
 	match move_name:
 		"Forward Overhead", "South Slash", "Forward Lunge Left", "Forward Lunge Right":
 			return "Stab"
+		"Smash", "Thrust":
+			return move_name
 	return "Slash"
 
 
@@ -333,6 +357,8 @@ func lock_aim(angle: float) -> void:
 
 
 func _on_animation_finished(anim_name: StringName) -> void:
+	if anim_name == &"Slash" and is_local_player():
+		combo_timer.start()
 	if blocking:
 		if anim_name == &"BlockStart" or anim_name == &"Blocking":
 			play_animation.rpc("Blocking")
@@ -372,23 +398,58 @@ func shake_camera() -> void:
 
 
 @rpc("any_peer")
-func recieve_damage() -> void:
+func recieve_damage(hit_pos: Vector2) -> void:
+	var tween = create_tween()
+	if is_hit_blocked(hit_pos):
+		block_effect.rpc(hit_pos)
+		return
 	health -= 1
-	flash_white.rpc()
+	tween.tween_property(healthbar, "value", health, 0.3)
+	flash_white.rpc(hit_pos)
 	shake_camera.rpc()
 	if health <= 0:
 		health = 3
 		position = Vector2.ZERO
+		tween.tween_property(healthbar, "value", 5, 0.3)
+		
 	
 
 
+func is_hit_blocked(hit_pos: Vector2) -> bool:
+	if not blocking:
+		return false
+	var shield_dir := Vector2.from_angle($Shield.global_rotation)
+	var hit_dir := hit_pos - global_position
+	return absf(shield_dir.angle_to(hit_dir)) <= deg_to_rad(BLOCK_ARC_DEGREES)
+
+
 @rpc("any_peer", "call_local")
-func flash_white() -> void:
+func block_effect(hit_pos: Vector2) -> void:
+	$Collide.global_position = hit_pos
+	var bounce_dir := hit_pos - global_position
+	if not bounce_dir.is_zero_approx():
+		$Collide.direction = bounce_dir.normalized()
+	$Collide.restart()
+	var shield_sprite: Sprite2D = $Shield/Sprite2D
+	shield_sprite.modulate = Color(3, 3, 3)
+	create_tween().tween_property(shield_sprite, "modulate", Color(1, 1, 1), 0.15)
+
+
+@rpc("any_peer", "call_local")
+func flash_white(hit_pos: Vector2) -> void:
+	$Collide.global_position = hit_pos
+	var blow_dir := global_position - hit_pos
+	if not blow_dir.is_zero_approx():
+		$Collide.direction = blow_dir.normalized()
+	$Collide.restart()
 	sprite.modulate = Color(10, 10, 10)
 	var tween = create_tween()
 	tween.tween_property(sprite, "modulate", Color(1, 1, 1), 0.15)
-
-
+	tween.tween_property(sprite, "scale", Vector2(1.4, 1.4), 0.06)
+	#await get_tree().create_timer(0.1).timeout
+	tween.tween_property(sprite, "scale", Vector2(1, 1), 0.06)
+	
+	
 func _on_attack_timer_timeout() -> void:
 	attacking = false
 	defending = false
@@ -408,10 +469,15 @@ func _on_timer_timeout() -> void:
 
 
 func _on_hit_box_node_body_entered(body: Node2D) -> void:
+	if not is_multiplayer_authority():
+		return
 	if body == self:
 		return
 	if not body.has_method("recieve_damage"):
 		return
 	if body.get_multiplayer_authority() == multiplayer.get_unique_id():
 		return
-	body.recieve_damage.rpc_id(body.get_multiplayer_authority())
+	# The spot on the victim's edge facing our sword's hitbox
+	var to_sword: Vector2 = $HitBoxNode/HitBox.global_position - body.global_position
+	var hit_pos: Vector2 = body.global_position + to_sword.limit_length(HIT_EFFECT_RADIUS)
+	body.recieve_damage.rpc_id(body.get_multiplayer_authority(), hit_pos)
