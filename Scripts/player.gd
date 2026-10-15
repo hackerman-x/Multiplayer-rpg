@@ -5,8 +5,17 @@ extends CharacterBody2D
 @onready var anim_player: AnimationPlayer = $AnimationPlayer
 @onready var sprite: AnimatedSprite2D = $SirCrumbsBottom  # adjust path/type to match your actual sprite node
 @onready var camera: Camera2D = $Camera2D
-@onready var healthbar: ProgressBar = $ProgressBar
+@onready var healthbar: TextureProgressBar = $HUD/Health
+@onready var manabar: TextureProgressBar = $HUD/Mana
 @onready var combo_timer: Timer = $ComboTimer   # Thrust window, started when Slash finishes
+@onready var hitnumber: Label = $HitNumber
+@onready var vignette : ColorRect = $HUD/ColorRect
+@onready var dead_screen: CanvasLayer = $DeadScreen
+@onready var spectate_name: Label = $DeadScreen/Root/Box/Spectate/Target
+@onready var respawn_label: Label = $DeadScreen/Root/Box/Countdown
+
+const CAPE_SHADER := preload("res://Shaders/cape_color.gdshader")
+const IMPACT_SHADER := preload("res://Shaders/impact_frame.gdshader")
 
 var SPEED = 100.0
 var DASH = 200.0
@@ -19,6 +28,15 @@ var NORMAL_DURATION = 0.001     # lock time for quick basic slashes
 var HOLD_DURATION = 0.4        # how long you hold attack (Stab lunge) or smash (Smash) before it fires
 var smash_charging := false
 var smash_start_time := 0.0
+var swish_charging := false
+var swish_start_time := 0.0
+var SWISH_MANA_COST = 50
+var SWISH_DISTANCE = 120.0     # how far the Swish teleport carries you (pixels)
+var SWISH_WINDUP = 0.5         # how long you stand still before teleporting (seconds)
+var SWISH_HIT_RADIUS = 14.0    # players this close to the teleport's path get hit
+var IMPACT_FRAME_TIME = 0.12   # how long the black-and-white impact frame shows (seconds)
+var IMPACT_FRAME_ATTACKS = ["Swish", "Smash"]   # landing a hit with these shows the impact frame
+var impact_frame: ColorRect    # full-screen overlay, only exists for our own player
 
 var move_map = {
 	"none_up": "Jodan Slice",
@@ -69,7 +87,35 @@ var charge_direction := ""
 var charge_start_time := 0.0
 var lunge_triggered := false
 
-var health := 5
+var MAX_HEALTH = 100
+var health: float = MAX_HEALTH
+var LOW_HEALTH = 20             # below this, the red vignette pulses
+var HEALTH_REGEN_DELAY = 6.0   # seconds without taking damage before health starts refilling
+var HEALTH_REGEN_RATE = 15.0     # health refilled per second after that
+var last_damaged := -INF        # when we last took damage (seconds)
+var vignette_tween: Tween
+var dead := false
+var spectate_index := 0
+# The SpawnIn frames are 300px tall with the ball at the very bottom; this lifts them so the ball sits on the player
+var SPAWN_VFX_OFFSET = Vector2(0, -135)
+
+var MAX_MANA = 100
+var mana: float = MAX_MANA
+var DASH_MANA_COST = 10
+var SMASH_MANA_COST = 30
+var BLOCK_MANA_DISCOUNT = 5   # a blocked hit costs (its damage - this) mana
+var MANA_REGEN_DELAY = 5.0    # seconds without spending mana before it starts refilling
+var MANA_REGEN_RATE = 15.0    # mana refilled per second after that
+var last_mana_spent := -INF   # when mana was last spent (seconds)
+
+# How much health each attack takes from the player it hits
+var DAMAGE = {
+	"Slash": 10,
+	"Thrust": 5,
+	"Stab": 20,    # the lunge
+	"Smash": 30,
+	"Swish": 50,
+}
 
 # aim is frozen from the moment a move fires until its animation finishes
 var aim_locked := false
@@ -89,10 +135,19 @@ var KNOCKBACK = {
 	"Thrust": 250.0,
 	"Stab": 400.0,    # the lunge
 	"Smash": 600.0,
+	"Swish": 0.0,    # goes straight through, no push
 }
 var KNOCKBACK_FRICTION = 1200.0   # how quickly a push slows down; higher = shorter slide
 var knockback_velocity := Vector2.ZERO
 var current_attack := ""          # animation name of the attack we're doing right now
+var hit_this_attack: Array[int] = []   # players already hit by the current attack (each can only be hit once)
+var hitnumber_start: Vector2           # where the damage number sits before it floats up
+var vfx_offset: Vector2                # where the crack VFX sits when aiming right (from the scene)
+# Each sound's normal pitch (1.0 = as recorded; lower = slower and deeper). Sounds not listed use 1.0
+var SFX_BASE_PITCH = {
+	"Walking": 0.75,
+}
+var SFX_PITCH_OFFSET = 0.1   # every play adds a random offset between -this and +this to the base pitch
 
 
 func _enter_tree() -> void:
@@ -107,6 +162,17 @@ func is_local_player() -> bool:
 
 func _ready() -> void:
 	healthbar.value = health
+	manabar.value = mana
+	hitnumber_start = hitnumber.position
+	hitnumber.text = ""
+	vfx_offset = $VFX.position
+	# Cape colour picked from the peer id, so every screen gives this player the same colour
+	var cape := ShaderMaterial.new()
+	cape.shader = CAPE_SHADER
+	cape.set_shader_parameter("cape_hue", fposmod(str(name).to_int() * 0.618034, 1.0))
+	sprite.material = cape
+	# Run _process after the AnimationPlayer (priority 0), so its fixed VFX position doesn't undo our rotation
+	process_priority = 1
 	Global.player = self
 	$Shield.visible = false
 	if str(name) == "1":
@@ -117,12 +183,50 @@ func _ready() -> void:
 	hitbox.monitoring = false
 	block_area.monitoring = false
 	anim_player.animation_finished.connect(_on_animation_finished)
-	healthbar.visible = is_local_player()
+	# Every player has a HUD in the same screen corner; only show our own, or theirs covers ours
+	$HUD.visible = is_local_player()
+	dead_screen.visible = false
+	$DeadTime.timeout.connect(respawn)
+	$DeadScreen/Root/Box/Spectate/Prev.pressed.connect(spectate.bind(-1))
+	$DeadScreen/Root/Box/Spectate/Next.pressed.connect(spectate.bind(1))
 
 	if not is_local_player(): return
 	camera.make_current()
 
+	# Impact-frame overlay, above everything else on screen
+	var impact_layer := CanvasLayer.new()
+	impact_layer.layer = 10
+	impact_frame = ColorRect.new()
+	impact_frame.set_anchors_preset(Control.PRESET_FULL_RECT)
+	impact_frame.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	impact_frame.material = ShaderMaterial.new()
+	impact_frame.material.shader = IMPACT_SHADER
+	impact_frame.visible = false
+	impact_layer.add_child(impact_frame)
+	add_child(impact_layer)
 
+
+
+
+func _process(_delta: float) -> void:
+	# The slash is turned 180° when facing left; flipping it vertically too keeps it the right way up
+	$Attack.flip_v = cos($Attack.rotation) < -0.01
+	$Shield/Sprite2D.flip_v = cos($Shield.rotation) < -0.01
+
+	if dead and is_local_player():
+		respawn_label.text = "Respawning in %d" % ceili($DeadTime.time_left)
+		# The player we were watching left or died: move on to someone else
+		if camera.target != self and (not is_instance_valid(camera.target) or camera.target.dead):
+			spectate(0)
+
+	# Point the crack the same way as the sword, on every player's screen
+	if $VFX.visible and $VFX.animation == &"Crack":
+		var angle: float = $Attack.rotation
+		# Facing left: mirror the crack instead of turning it 180°, so it isn't upside down
+		var facing_left := cos(angle) < -0.01
+		$VFX.flip_h = facing_left
+		$VFX.rotation = angle - PI if facing_left else angle
+		$VFX.position = vfx_offset.rotated(angle)
 
 
 func _unhandled_input(_event: InputEvent) -> void:
@@ -132,6 +236,7 @@ func _unhandled_input(_event: InputEvent) -> void:
 
 func _physics_process(delta: float) -> void:
 	if not is_local_player(): return
+	if dead: return
 	var direction := Input.get_vector("left", "right", "up", "down")
 
 	if lunging:
@@ -166,7 +271,18 @@ func _physics_process(delta: float) -> void:
 
 	apply_facing.rpc(body_animation())
 
-	if Input.is_action_just_pressed("Dash"):
+	# Refill mana once none has been spent for a while
+	if mana < MAX_MANA and Time.get_ticks_msec() / 1000.0 - last_mana_spent >= MANA_REGEN_DELAY:
+		mana = minf(mana + MANA_REGEN_RATE * delta, MAX_MANA)
+		manabar.value = mana
+
+	# Refill health once we haven't been hurt for a while
+	if health < MAX_HEALTH and Time.get_ticks_msec() / 1000.0 - last_damaged >= HEALTH_REGEN_DELAY:
+		health = minf(health + HEALTH_REGEN_RATE * delta, MAX_HEALTH)
+		healthbar.value = health
+		update_low_health_effect()
+
+	if Input.is_action_just_pressed("Dash") and spend_mana(DASH_MANA_COST):
 		$DashTimer.start()
 		SPEED = DASH
 		$Dash.emitting = true
@@ -190,10 +306,23 @@ func handle_attack_input() -> void:
 		smash_start_time = now
 	if smash_charging and Input.is_action_pressed("smash") and now - smash_start_time >= HOLD_DURATION:
 		smash_charging = false
-		# stay rooted for the whole Smash animation
-		register_move("Smash", false, anim_player.get_animation("Smash").length)
+		# Only pay (and smash) if we're allowed to act and have the mana
+		if can_act() and spend_mana(SMASH_MANA_COST):
+			# stay rooted for the whole Smash animation
+			register_move("Smash", false, anim_player.get_animation("Smash").length)
 	if Input.is_action_just_released("smash"):
 		smash_charging = false
+
+	# Swish: hold R, then dash straight through whoever is in the way
+	if Input.is_action_just_pressed("Swish"):
+		swish_charging = true
+		swish_start_time = now
+	if swish_charging and Input.is_action_pressed("Swish") and now - swish_start_time >= HOLD_DURATION:
+		swish_charging = false
+		if can_act() and spend_mana(SWISH_MANA_COST):
+			register_move("Swish", false, anim_player.get_animation("Swish").length)
+	if Input.is_action_just_released("Swish"):
+		swish_charging = false
 
 	if Input.is_action_just_pressed("attack"):
 		if combo_timer.time_left > 0:
@@ -248,6 +377,7 @@ func handle_block() -> void:
 	track_combo(defensive_map[opposite_direction(dir_from_vector(aim))])
 	set_shield_angle.rpc(aim.angle())
 	play_animation.rpc("BlockStart")
+	$SFX/Shield.play()
 
 
 func stop_block() -> void:
@@ -329,6 +459,9 @@ func perform_attack(move_name: String, is_defensive: bool, duration: float) -> v
 	var angle := (get_global_mouse_position() - global_position).angle()
 	if lunge_moves.has(move_name):
 		angle = lunge_moves[move_name].angle()
+	elif move_name == "Smash" or move_name == "Swish":
+		# Snap to the nearest of up/down/left/right, like the lunge
+		angle = snappedf(angle, PI / 2)
 	lock_aim.rpc(angle)
 
 	attacking = true
@@ -342,17 +475,39 @@ func perform_attack(move_name: String, is_defensive: bool, duration: float) -> v
 	if lunge_moves.has(move_name):
 		lunging = true
 		lunge_direction = lunge_moves[move_name]
+	elif move_name == "Swish":
+		lunge_direction = Vector2.from_angle(angle)
+		start_swish_dash()
 
 	if not is_defensive:
 		current_attack = anim_for_move(move_name)
+		hit_this_attack.clear()
 		play_animation.rpc(current_attack)
+
+
+# Stand still for the wind-up, then dash (the AttackTimer ends the dash)
+func start_swish_dash() -> void:
+	await get_tree().create_timer(SWISH_WINDUP).timeout
+	if not attacking or current_attack != "Swish" or dead:
+		return
+	# Teleport: stops early at walls; players aren't in our collision mask, so we go straight through them
+	var start := global_position
+	move_and_collide(lunge_direction * SWISH_DISTANCE)
+	var end := global_position
+	play_sfx_for_all.rpc("Swish")
+	# Far too fast for the hitbox to notice, so check everyone standing along the path directly
+	for p in get_parent().get_children():
+		if p != self and p.scene_file_path == scene_file_path and not p.dead:
+			var closest := Geometry2D.get_closest_point_to_segment(p.global_position, start, end)
+			if closest.distance_to(p.global_position) <= SWISH_HIT_RADIUS:
+				hit_player(p)
 
 
 func anim_for_move(move_name: String) -> String:
 	match move_name:
 		"Forward Overhead", "South Slash", "Forward Lunge Left", "Forward Lunge Right":
 			return "Stab"
-		"Smash", "Thrust":
+		"Smash", "Thrust", "Swish":
 			return move_name
 	return "Slash"
 
@@ -362,6 +517,40 @@ func play_animation(anim_name: String) -> void:
 	if $Attack.sprite_frames.has_animation(anim_name):
 		$Attack.animation = anim_name
 	anim_player.play(anim_name)
+	match anim_name:
+		"Slash":
+			play_sfx("Sword")
+		"Smash":
+			play_sfx("Smash")
+
+
+@rpc("call_local")
+func play_sfx_for_all(sound: String) -> void:
+	play_sfx(sound)
+
+
+# Black-and-white flash over the whole screen; called on our own player, and sent to the victim's game
+@rpc("any_peer")
+func show_impact_frame() -> void:
+	if impact_frame == null:
+		return
+	impact_frame.visible = true
+	await get_tree().create_timer(IMPACT_FRAME_TIME).timeout
+	impact_frame.visible = false
+
+
+# Plays one of the sounds under the SFX node; skipped if that sound node doesn't exist
+func play_sfx(sound: String) -> void:
+	var player := get_node_or_null("SFX/" + sound) as AudioStreamPlayer2D
+	if player:
+		play_with_random_pitch(player)
+
+
+#different pitch every time, so repeated sounds don't feel robotic
+func play_with_random_pitch(player: AudioStreamPlayer2D) -> void:
+	var base: float = SFX_BASE_PITCH.get(str(player.name), 1.0)
+	player.pitch_scale = base + randf_range(-SFX_PITCH_OFFSET, SFX_PITCH_OFFSET)
+	player.play()
 
 
 @rpc("call_local")
@@ -396,6 +585,14 @@ func body_animation() -> String:
 @rpc("call_local")
 func apply_facing(anim_name: String) -> void:
 	sprite.play(anim_name)
+	# The walk animations all end in "animated", so footsteps follow them
+	var steps := get_node_or_null("SFX/Walking") as AudioStreamPlayer2D
+	if steps:
+		var walking := anim_name.ends_with("animated")
+		if walking and not steps.playing:
+			play_with_random_pitch(steps)
+		elif not walking and steps.playing:
+			steps.stop()
 
 
 @rpc("any_peer", "call_local")
@@ -417,23 +614,131 @@ func shake_camera() -> void:
 
 
 @rpc("any_peer")
-func recieve_damage(hit_pos: Vector2, knockback: Vector2) -> void:
-	var tween = create_tween()
-	if is_hit_blocked(hit_pos):
+func recieve_damage(hit_pos: Vector2, knockback: Vector2, damage: int) -> void:
+	if dead:
+		return
+	# Never accept more than the strongest attack does, in case a modified game sends a huge number
+	damage = clampi(damage, 0, DAMAGE.values().max())
+	# With no mana left the shield can't stop anything, so the hit goes through
+	if mana > 0 and is_hit_blocked(hit_pos):
 		block_effect.rpc(hit_pos)
+		set_mana(mana - maxi(damage - BLOCK_MANA_DISCOUNT, 0))
 		return
 	knockback_velocity = knockback
-	health -= 1
+	health -= damage
+	last_damaged = Time.get_ticks_msec() / 1000.0
+	var tween = create_tween()
 	tween.tween_property(healthbar, "value", health, 0.3)
 	flash_white.rpc(hit_pos)
+	show_hit_number.rpc(damage)
 	shake_camera.rpc()
-	if health <= 0:
-		health = 3
-		position = Vector2.ZERO
-		knockback_velocity = Vector2.ZERO
-		tween.tween_property(healthbar, "value", 5, 0.3)
-		
 	
+	if health <= 0:
+		die()
+	update_low_health_effect()
+
+
+# ---------------- Death, spectating and respawning (runs in the dead player's own game) ----------------
+
+func die() -> void:
+	health = 0
+	knockback_velocity = Vector2.ZERO
+	velocity = Vector2.ZERO
+	charging = false
+	smash_charging = false
+	swish_charging = false
+	if blocking:
+		stop_block()
+	set_dead_state.rpc(true, global_position)
+	$DeadTime.start()
+	dead_screen.visible = true
+	spectate(0)
+
+
+func respawn() -> void:
+	var spawn_points: Array = get_parent().get_node("SpawnPoints").get_children()
+	var spawn_pos: Vector2 = spawn_points.pick_random().global_position
+	health = MAX_HEALTH
+	healthbar.value = health
+	set_mana(MAX_MANA)
+	dead_screen.visible = false
+	camera.target = self
+	set_dead_state.rpc(false, spawn_pos)
+	update_low_health_effect()
+
+
+# Hides/shows this player for everyone; on respawn also moves them and plays the SpawnIn effect
+@rpc("call_local")
+func set_dead_state(is_dead: bool, pos: Vector2) -> void:
+	dead = is_dead
+	visible = not is_dead
+	global_position = pos
+	$CollisionShape2D.set_deferred("disabled", is_dead)
+	if not is_dead:
+		play_spawn_vfx()
+
+
+func play_spawn_vfx() -> void:
+	var frames: SpriteFrames = $VFX.sprite_frames
+	$VFX.animation = &"SpawnIn"
+	$VFX.position = SPAWN_VFX_OFFSET
+	$VFX.rotation = 0
+	$VFX.flip_h = false
+	$VFX.visible = true
+	$SFX/Spawn.play()
+	$VFX.play()
+	await get_tree().create_timer(frames.get_frame_count(&"SpawnIn") / frames.get_animation_speed(&"SpawnIn")).timeout
+	$VFX.visible = false
+	$VFX.animation = &"Crack"
+	$VFX.position = vfx_offset
+
+
+# Points our camera at the next/previous living player (step -1 or 1; 0 = stay on/refresh the current one)
+func spectate(step: int) -> void:
+	var others: Array = []
+	for p in get_parent().get_children():
+		if p != self and p.scene_file_path == scene_file_path and not p.dead:
+			others.append(p)
+	if others.is_empty():
+		camera.target = self
+		spectate_name.text = "No one to spectate"
+		return
+	spectate_index = posmod(spectate_index + step, others.size())
+	camera.target = others[spectate_index]
+	spectate_name.text = others[spectate_index].get_node("Label").text
+
+
+# Pulses the red vignette while health is low. Only starts/stops it when crossing the line, never every frame
+func update_low_health_effect() -> void:
+	var low: bool = health < LOW_HEALTH and not dead
+	if low == vignette.visible:
+		return
+	vignette.visible = low
+	if vignette_tween:
+		vignette_tween.kill()
+	if low:
+		vignette_tween = create_tween().set_loops()
+		vignette_tween.tween_property(vignette.material, "shader_parameter/vignette_radius", 1.6, 1)
+		vignette_tween.tween_property(vignette.material, "shader_parameter/vignette_radius", 2.0, 1)
+	else:
+		vignette.material.set_shader_parameter("vignette_radius", 2.0)
+
+	
+
+
+func set_mana(value: float) -> void:
+	if value < mana:
+		last_mana_spent = Time.get_ticks_msec() / 1000.0
+	mana = clampf(value, 0, MAX_MANA)
+	create_tween().tween_property(manabar, "value", mana, 0.3)
+
+
+# Pays the cost and returns true, or returns false (and pays nothing) if there isn't enough mana
+func spend_mana(cost: int) -> bool:
+	if mana < cost:
+		return false
+	set_mana(mana - cost)
+	return true
 
 
 func is_hit_blocked(hit_pos: Vector2) -> bool:
@@ -457,12 +762,28 @@ func block_effect(hit_pos: Vector2) -> void:
 
 
 @rpc("any_peer", "call_local")
+func show_hit_number(damage: int) -> void:
+	hitnumber.scale = Vector2(1.0, 1.0)   # start big so it "pops", then shrinks back to normal
+	var tween := create_tween().set_parallel(true)
+	tween.tween_property(hitnumber, "scale", Vector2(0.6, 0.6), 0.5)
+	hitnumber.text = str(-damage)
+	hitnumber.pivot_offset = hitnumber.size / 2   # tilt around the middle, not the top-left corner
+	hitnumber.rotation_degrees = randf_range(-10, 10)
+	hitnumber.position = hitnumber_start
+	hitnumber.modulate.a = 1.0
+	var target := hitnumber_start + Vector2(randf_range(-5, 5), -15)   # up and a little sideways
+	tween.tween_property(hitnumber, "position", target, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	tween.tween_property(hitnumber, "modulate:a", 0.0, 0.5).set_delay(0.2)
+
+
+@rpc("any_peer", "call_local")
 func flash_white(hit_pos: Vector2) -> void:
 	$Collide.global_position = hit_pos
 	var blow_dir := global_position - hit_pos
 	if not blow_dir.is_zero_approx():
 		$Collide.direction = blow_dir.normalized()
 	$Collide.restart()
+	play_sfx("Hurt")
 	sprite.modulate = Color(10, 10, 10)
 	var tween = create_tween()
 	tween.tween_property(sprite, "modulate", Color(1, 1, 1), 0.15)
@@ -496,12 +817,35 @@ func _on_hit_box_node_body_entered(body: Node2D) -> void:
 		return
 	if not body.has_method("recieve_damage"):
 		return
+	hit_player(body)
+
+
+# Damages another player with our current attack (used by the hitbox and by the Swish teleport)
+func hit_player(body: Node2D) -> void:
 	if body.get_multiplayer_authority() == multiplayer.get_unique_id():
 		return
+	if body.dead:
+		return
+	# Getting pushed out and back into the hitbox during the same attack doesn't count again
+	if body.get_instance_id() in hit_this_attack:
+		return
+	hit_this_attack.append(body.get_instance_id())
 	# The spot on the victim's edge facing our sword's hitbox
 	var to_sword: Vector2 = $HitBoxNode/HitBox.global_position - body.global_position
 	var hit_pos: Vector2 = body.global_position + to_sword.limit_length(HIT_EFFECT_RADIUS)
 	# Push them straight away from us, as hard as the current attack hits
 	var push_dir := (body.global_position - global_position).normalized()
 	var knockback: Vector2 = push_dir * KNOCKBACK.get(current_attack, 0.0)
-	body.recieve_damage.rpc_id(body.get_multiplayer_authority(), hit_pos, knockback)
+	var damage: int = DAMAGE.get(current_attack, 0)
+	body.recieve_damage.rpc_id(body.get_multiplayer_authority(), hit_pos, knockback, damage)
+	if current_attack in IMPACT_FRAME_ATTACKS:
+		show_impact_frame()
+		body.show_impact_frame.rpc_id(body.get_multiplayer_authority())
+
+
+func _on_hittimer_timeout() -> void:
+	var tween = create_tween()
+	tween.tween_property(hitnumber, "visible", false, 0.5)
+	tween.tween_property(hitnumber, "scale", 0.3, 0.5)
+	hitnumber.text = ""
+	hitnumber.rotation = 0

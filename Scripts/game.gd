@@ -4,7 +4,11 @@ extends Node
 # Exported builds (web and desktop) connect securely through Caddy on the game droplet
 # (139.59.76.134): wss://LIVE_SERVER_HOST/manager and wss://LIVE_SERVER_HOST/lobby/<port>
 # Running from the Godot editor connects to a manager on this computer: ws://localhost:<port>
-const LIVE_SERVER_HOST := "play.waitinggodot.in"
+const LIVE_SERVER_HOST := "139-59-76-134.sslip.io"
+# true: exported desktop builds connect straight to the droplet's IP instead (ws://, no Caddy needed).
+# Browser builds always use the secure address above, since https pages can't use plain ws://.
+const USE_DIRECT_IP := true
+const DIRECT_SERVER_IP := "139.59.76.134"
 
 const MANAGER_PORT := 9999
 const LOBBY_PORT_FIRST := 10000
@@ -18,6 +22,7 @@ const REGISTER_TIMEOUT := 5.0      # connections that don't send the right code 
 const LOBBY_CONNECT_RETRIES := 10  # a new lobby server needs a moment to start up
 
 const Player = preload("res://Scenes/player.tscn")
+const BUTTON_SOUND = preload("res://Assets/SFX/button_press.tres")   # random pitch is set in this file
 
 @onready var main_menu: Control = $CanvasLayer/MainMenu
 @onready var host_button: Button = $CanvasLayer/MainMenu/MarginContainer/VBoxContainer/HostButton
@@ -29,6 +34,7 @@ const Player = preload("res://Scenes/player.tscn")
 @onready var player_list: Label = $CanvasLayer/LobbyMenu/MarginContainer/VBoxContainer/PlayerList
 @onready var start_button: Button = $CanvasLayer/LobbyMenu/MarginContainer/VBoxContainer/StartButton
 @onready var lobby_status: Label = $CanvasLayer/LobbyMenu/MarginContainer/VBoxContainer/LobbyStatus
+@onready var name_tag: LineEdit = $CanvasLayer/MainMenu/MarginContainer/VBoxContainer/NameTag
 
 enum Role { CLIENT, MANAGER, LOBBY_SERVER }
 var role := Role.CLIENT
@@ -39,6 +45,7 @@ var lobbies := {}   # code -> { "port": int, "pid": int }
 # Lobby server state
 var lobby_code := ""
 var members: Array[int] = []   # peer ids in join order; members[0] is the host
+var member_names := {}         # peer id -> the name they typed (or "Player N")
 var game_started := false
 
 # Client state
@@ -195,6 +202,7 @@ func _on_lobby_peer_disconnected(id: int) -> void:
 	if id not in members:
 		return
 	members.erase(id)
+	member_names.erase(id)
 	remove_player(id)
 	if members.is_empty():
 		get_tree().quit()
@@ -212,11 +220,11 @@ func _refuse(id: int, message: String) -> void:
 
 func _broadcast_lobby() -> void:
 	for id in members:
-		update_lobby.rpc_id(id, members, members[0])
+		update_lobby.rpc_id(id, members, members[0], member_names)
 
 
 @rpc("any_peer", "reliable")
-func register_in_lobby(code: String) -> void:
+func register_in_lobby(code: String, player_name: String) -> void:
 	if role != Role.LOBBY_SERVER:
 		return
 	var id := multiplayer.get_remote_sender_id()
@@ -228,6 +236,8 @@ func register_in_lobby(code: String) -> void:
 		_refuse(id, "That lobby is full.")
 	elif id not in members:
 		members.append(id)
+		player_name = player_name.strip_edges().left(16)
+		member_names[id] = player_name if player_name != "" else "Player %d" % members.size()
 		_broadcast_lobby()
 
 
@@ -242,7 +252,7 @@ func request_start_game() -> void:
 	for member in members:
 		add_player(member)
 	for member in members:
-		on_game_started.rpc_id(member)
+		on_game_started.rpc_id(member, member_names)
 	print("Lobby %s started with %d players" % [lobby_code, members.size()])
 
 
@@ -259,21 +269,32 @@ func _setup_client() -> void:
 	main_menu.show()
 	menu_status.text = ""
 
+	# One click sound for every menu button, played the moment it's pressed down
+	var click := AudioStreamPlayer.new()
+	click.stream = BUTTON_SOUND
+	add_child(click)
+	for button in find_children("*", "BaseButton", true, false):
+		button.button_down.connect(click.play)
+
 
 func _use_live_server() -> bool:
 	return not OS.has_feature("editor")
 
 
 func _manager_url() -> String:
-	if _use_live_server():
-		return "wss://%s/manager" % LIVE_SERVER_HOST
-	return "ws://localhost:%d" % MANAGER_PORT
+	if not _use_live_server():
+		return "ws://localhost:%d" % MANAGER_PORT
+	if USE_DIRECT_IP and not OS.has_feature("web"):
+		return "ws://%s:%d" % [DIRECT_SERVER_IP, MANAGER_PORT]
+	return "wss://%s/manager" % LIVE_SERVER_HOST
 
 
 func _lobby_url(port: int) -> String:
-	if _use_live_server():
-		return "wss://%s/lobby/%d" % [LIVE_SERVER_HOST, port]
-	return "ws://localhost:%d" % port
+	if not _use_live_server():
+		return "ws://localhost:%d" % port
+	if USE_DIRECT_IP and not OS.has_feature("web"):
+		return "ws://%s:%d" % [DIRECT_SERVER_IP, port]
+	return "wss://%s/lobby/%d" % [LIVE_SERVER_HOST, port]
 
 
 func _connect_to(url: String) -> void:
@@ -319,7 +340,7 @@ func _on_connected_to_server() -> void:
 		else:
 			request_join_lobby.rpc_id(1, current_code)
 	elif client_phase == "lobby":
-		register_in_lobby.rpc_id(1, current_code)
+		register_in_lobby.rpc_id(1, current_code, name_tag.text)
 
 
 @rpc("authority", "reliable")
@@ -364,7 +385,7 @@ func _on_server_disconnected() -> void:
 
 
 @rpc("authority", "reliable")
-func update_lobby(player_ids: Array, host_id: int) -> void:
+func update_lobby(player_ids: Array, host_id: int, names: Dictionary) -> void:
 	main_menu.hide()
 	lobby_menu.show()
 	lobby_code_box.text = current_code
@@ -372,7 +393,7 @@ func update_lobby(player_ids: Array, host_id: int) -> void:
 	var my_id := multiplayer.get_unique_id()
 	var lines := PackedStringArray()
 	for i in player_ids.size():
-		var line := "Player %d" % (i + 1)
+		var line: String = names[player_ids[i]]
 		if player_ids[i] == host_id:
 			line += " (host)"
 		if player_ids[i] == my_id:
@@ -393,8 +414,12 @@ func update_lobby(player_ids: Array, host_id: int) -> void:
 
 
 @rpc("authority", "reliable")
-func on_game_started() -> void:
+func on_game_started(names: Dictionary) -> void:
 	lobby_menu.hide()
+	for id in names:
+		var player := get_node_or_null(str(id))
+		if player:
+			player.get_node("Label").text = names[id]
 
 
 func _on_copy_button_pressed() -> void:
@@ -447,7 +472,7 @@ func _return_to_menu(message: String) -> void:
 
 func add_player(peer_id):
 	var player = Player.instantiate()
-	player.name = str(peer_id)
+	player.name = str(peer_id)   # must stay the peer id: it decides who controls this player
 	add_child(player)
 
 func remove_player(peer_id):

@@ -5,6 +5,8 @@
 [ext_resource type="Shader" uid="uid://d0uqeauo23mj3" path="res://Shaders/wind_sway.gdshader" id="5_7jktm"]
 [ext_resource type="FontFile" uid="uid://ctqw4ukyw3m7c" path="res://Assets/UI/PixelOperator8-Bold.ttf" id="6_eow3j"]
 [ext_resource type="FontFile" uid="uid://dfgayo4r5i541" path="res://Assets/UI/PixelOperator8.ttf" id="7_j5wjh"]
+[ext_resource type="AudioStream" uid="uid://d1x6466pa65nd" path="res://Assets/SFX/dragon-studio-button-press-382713.mp3" id="7_vef74"]
+[ext_resource type="AudioStream" uid="uid://8ode171sxqtc" path="res://Assets/SFX/button_press.tres" id="8_j5wjh"]
 [ext_resource type="Texture2D" uid="uid://dlyx83f81ym88" path="res://Assets/Map/PropsAtlas8.png" id="tex_propsatlas8"]
 [ext_resource type="Texture2D" uid="uid://dqatjxjcp25mh" path="res://Assets/Map/TX Tileset Grass.png" id="tex_txgrass"]
 
@@ -447,9 +449,9 @@ anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
 offset_left = -346.661
-offset_top = -109.39102
-offset_right = -1253.309
-offset_bottom = -566.391
+offset_top = -130.391
+offset_right = -1184.4431
+offset_bottom = -545.391
 grow_horizontal = 2
 grow_vertical = 2
 
@@ -484,6 +486,12 @@ text = "Join"
 layout_mode = 2
 theme_override_fonts/font = ExtResource("7_j5wjh")
 placeholder_text = "Paste lobby code here"
+alignment = 1
+
+[node name="NameTag" type="LineEdit" parent="CanvasLayer/MainMenu/MarginContainer/VBoxContainer" unique_id=806351916]
+layout_mode = 2
+theme_override_fonts/font = ExtResource("7_j5wjh")
+placeholder_text = "Type Username"
 alignment = 1
 
 [node name="StatusLabel" type="Label" parent="CanvasLayer/MainMenu/MarginContainer/VBoxContainer" unique_id=1836879231]
@@ -571,6 +579,24 @@ spawn_path = NodePath("..")
 
 [node name="Camera2D" type="Camera2D" parent="." unique_id=83166227]
 zoom = Vector2(1.1, 1.1)
+
+[node name="SpawnPoints" type="Node2D" parent="." unique_id=918790344]
+
+[node name="Marker2D" type="Marker2D" parent="SpawnPoints" unique_id=1262323736]
+position = Vector2(503.99997, -6.9999995)
+scale = Vector2(0.99999994, 0.99999994)
+
+[node name="Marker2D2" type="Marker2D" parent="SpawnPoints" unique_id=1139444932]
+position = Vector2(-2, 507.99994)
+scale = Vector2(0.99999994, 0.99999994)
+
+[node name="Marker2D3" type="Marker2D" parent="SpawnPoints" unique_id=495231386]
+position = Vector2(-500.99997, -5)
+scale = Vector2(0.99999994, 0.99999994)
+
+[node name="Marker2D4" type="Marker2D" parent="SpawnPoints" unique_id=78508514]
+position = Vector2(2, -499.99997)
+scale = Vector2(0.99999994, 0.99999994)
 
 [connection signal="pressed" from="CanvasLayer/MainMenu/MarginContainer/VBoxContainer/HostButton" to="." method="_on_host_button_pressed"]
 [connection signal="pressed" from="CanvasLayer/MainMenu/MarginContainer/VBoxContainer/JoinButton" to="." method="_on_join_button_pressed"]
