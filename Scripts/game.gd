@@ -23,6 +23,26 @@ const LOBBY_CONNECT_RETRIES := 10  # a new lobby server needs a moment to start 
 
 const Player = preload("res://Scenes/player.tscn")
 const BUTTON_SOUND = preload("res://Assets/SFX/button_press.tres")   # random pitch is set in this file
+const FONT = preload("res://Assets/UI/PixelOperator8.ttf")
+const FONT_BOLD = preload("res://Assets/UI/PixelOperator8-Bold.ttf")
+const TITLE_MENU_WIDTH := 314.0    # main/lobby menu width on the title screen (wide enough for "Paste lobby code here")
+const TITLE_MENU_MARGIN := 0.02    # gap left of the menu, as a fraction of the window width
+const TITLE_WORDS_START := 0.3     # the title words start this far across the title picture (the rest is empty grass)
+const TITLE_MENU_MIN_SCALE := 0.8  # the menu may shrink to this size to make room for the title
+const TITLE_GRASS_COLOR := Color8(114, 117, 27)   # the title picture's grass, used to fill any gap around it
+
+# One card per move in the Tutorial screen: picture, name, keys, and what it does
+const TUTORIAL_MOVES = [
+	{"pic": "move", "name": "Move", "keys": "W A S D", "info": "Walk around. You always face your mouse."},
+	{"pic": "slash", "name": "Slash", "keys": "Left Click", "info": "Quick swing. 10 damage, a small push."},
+	{"pic": "thrust", "name": "Thrust", "keys": "Click again right after a Slash", "info": "Follow-up poke once the Slash finishes. 5 damage."},
+	{"pic": "lunge", "name": "Lunge", "keys": "Hold Left Click", "info": "Dash forward with a stab in the way you aim. 20 damage, big push."},
+	{"pic": "spin", "name": "Spin Attack", "keys": "Hold Space", "info": "Spin your sword and hit everyone around you. 25 damage, 25 mana."},
+	{"pic": "smash", "name": "Smash", "keys": "Hold Q", "info": "Slam the ground and crack it. 40 damage, huge push. Costs 30 mana."},
+	{"pic": "swish", "name": "Swish", "keys": "Hold R", "info": "Wind up, then teleport straight through the enemy. 30 damage. Costs 25 mana."},
+	{"pic": "block", "name": "Block", "keys": "Hold Right Click", "info": "Shield follows your mouse and stops hits from the front. Blocking costs mana; at 0 mana hits go through."},
+	{"pic": "dash", "name": "Dash", "keys": "Shift", "info": "Quick burst of speed. Costs 10 mana."},
+]
 
 @onready var main_menu: Control = $CanvasLayer/MainMenu
 @onready var host_button: Button = $CanvasLayer/MainMenu/MarginContainer/VBoxContainer/HostButton
@@ -35,6 +55,10 @@ const BUTTON_SOUND = preload("res://Assets/SFX/button_press.tres")   # random pi
 @onready var start_button: Button = $CanvasLayer/LobbyMenu/MarginContainer/VBoxContainer/StartButton
 @onready var lobby_status: Label = $CanvasLayer/LobbyMenu/MarginContainer/VBoxContainer/LobbyStatus
 @onready var name_tag: LineEdit = $CanvasLayer/MainMenu/MarginContainer/VBoxContainer/NameTag
+@onready var tutorial_menu: Control = $CanvasLayer/TutorialMenu
+@onready var tutorial_list: VBoxContainer = $CanvasLayer/TutorialMenu/MarginContainer/Box/Scroll/Moves
+@onready var leaderboard: PanelContainer = $LeaderboardLayer/Leaderboard
+@onready var leaderboard_grid: GridContainer = $LeaderboardLayer/Leaderboard/Box/Grid
 
 enum Role { CLIENT, MANAGER, LOBBY_SERVER }
 var role := Role.CLIENT
@@ -55,6 +79,11 @@ var current_code := ""
 var lobby_port := 0
 var connect_attempts := 0
 var refusal_message := ""
+
+# Leaderboard (hold Tab in a match)
+var title_backdrop: ColorRect   # grass-coloured fill behind the title picture (made by _layout_title_screen)
+var player_names := {}         # peer id -> name, sent when the match starts
+var scores := {}               # peer id -> {"kills": int, "deaths": int}
 
 
 func _ready() -> void:
@@ -269,12 +298,189 @@ func _setup_client() -> void:
 	main_menu.show()
 	menu_status.text = ""
 
+	# Fit the title screen to the window now and whenever the window is resized
+	get_viewport().size_changed.connect(_layout_title_screen)
+	_layout_title_screen.call_deferred()
+
 	# One click sound for every menu button, played the moment it's pressed down
 	var click := AudioStreamPlayer.new()
 	click.stream = BUTTON_SOUND
 	add_child(click)
 	for button in find_children("*", "BaseButton", true, false):
 		button.button_down.connect(click.play)
+
+	tutorial_menu.hide()
+	_build_tutorial()
+
+
+func _process(_delta: float) -> void:
+	if role != Role.CLIENT:
+		return
+	# Only during a match: hold Tab to see the scores
+	var show := Input.is_key_pressed(KEY_TAB) and not _players().is_empty()
+	if show and not leaderboard.visible:
+		_refresh_leaderboard()
+	leaderboard.visible = show
+
+
+# ---------------- Leaderboard ----------------
+
+func _players() -> Array:
+	return get_children().filter(func(c): return c.scene_file_path == Player.resource_path)
+
+
+# The panel, title and grid are in game.tscn (LeaderboardLayer); this fills in the rows
+func _refresh_leaderboard() -> void:
+	for child in leaderboard_grid.get_children():
+		child.queue_free()
+	var gold := Color(1, 0.85, 0.4)
+	for header in ["#", "Player", "Kills", "Deaths"]:
+		leaderboard_grid.add_child(_board_cell(header, FONT_BOLD, gold))
+
+	# Only players still in the match; most kills first, fewer deaths breaks ties
+	var ids: Array = _players().map(func(p): return str(p.name).to_int())
+	ids.sort_custom(func(a, b):
+		var sa := _score(a)
+		var sb := _score(b)
+		if sa.kills != sb.kills:
+			return sa.kills > sb.kills
+		return sa.deaths < sb.deaths)
+
+	var my_id := multiplayer.get_unique_id()
+	for i in ids.size():
+		var id: int = ids[i]
+		var color := Color(0.55, 0.85, 1) if id == my_id else Color(0.92, 0.92, 0.92)
+		var player_name: String = player_names.get(id, "Player %d" % id)
+		if id == my_id:
+			player_name += " (you)"
+		leaderboard_grid.add_child(_board_cell(str(i + 1), FONT, color))
+		leaderboard_grid.add_child(_board_cell(player_name, FONT, color))
+		leaderboard_grid.add_child(_board_cell(str(_score(id).kills), FONT, color))
+		leaderboard_grid.add_child(_board_cell(str(_score(id).deaths), FONT, color))
+
+
+func _score(id: int) -> Dictionary:
+	return scores.get(id, {"kills": 0, "deaths": 0})
+
+
+func _board_cell(text: String, font: Font, color: Color) -> Label:
+	var label := _tutorial_label(text, font, color)
+	label.autowrap_mode = TextServer.AUTOWRAP_OFF
+	return label
+
+
+# Sent by a player when they die, to everyone (including themselves)
+@rpc("any_peer", "call_local", "reliable")
+func record_kill(killer_id: int, victim_id: int) -> void:
+	# The victim's own game sends this, so ignore anyone reporting a death that isn't theirs
+	var sender := multiplayer.get_remote_sender_id()
+	if sender != 0 and sender != victim_id and sender != multiplayer.get_unique_id():
+		return
+	var victim := _score(victim_id)
+	victim.deaths += 1
+	scores[victim_id] = victim
+	if killer_id != victim_id and killer_id != 0:
+		var killer := _score(killer_id)
+		killer.kills += 1
+		scores[killer_id] = killer
+	if leaderboard and leaderboard.visible:
+		_refresh_leaderboard()
+
+
+# The title animation is a full background picture (1280x720) with empty space on its left:
+# stretch it to cover the whole window, and put the menus in that empty space.
+# The menus' CanvasLayer follows the camera, so everything here is in world units.
+func _layout_title_screen() -> void:
+	var cam: Camera2D = $Camera2D
+	var view := Rect2()
+	view.size = get_viewport().get_visible_rect().size / cam.zoom
+	view.position = cam.get_screen_center_position() - view.size / 2
+
+	var logo: AnimatedSprite2D = $SirCrumbs
+	var frame_size := logo.sprite_frames.get_frame_texture(logo.animation, 0).get_size()
+	var menu_left := view.position.x + view.size.x * TITLE_MENU_MARGIN
+	# Fill the whole window with the picture; on very wide windows fit the height instead so the knight isn't cut off
+	var fit := minf(maxf(view.size.x / frame_size.x, view.size.y / frame_size.y), view.size.y / frame_size.y)
+	# Room left of the title words (the picture's right edge sits on the window's right edge)
+	var room := view.end.x - frame_size.x * fit * (1.0 - TITLE_WORDS_START) - 10 - menu_left
+	if room < TITLE_MENU_WIDTH * TITLE_MENU_MIN_SCALE:
+		# Narrow window: shrink the picture until the smallest menu fits beside the words
+		room = TITLE_MENU_WIDTH * TITLE_MENU_MIN_SCALE
+		fit = (view.end.x - 10 - menu_left - room) / (frame_size.x * (1.0 - TITLE_WORDS_START))
+	var menu_scale := minf(room / TITLE_MENU_WIDTH, 1.0)
+
+	logo.centered = true
+	logo.scale = Vector2(fit, fit)
+	logo.position = Vector2(view.end.x - frame_size.x * fit / 2, view.get_center().y)
+	# Any part of the window the picture doesn't reach gets the picture's grass colour, so the map never peeks through
+	if title_backdrop == null:
+		title_backdrop = ColorRect.new()
+		title_backdrop.color = TITLE_GRASS_COLOR
+		title_backdrop.show_behind_parent = true
+		title_backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		logo.add_child(title_backdrop)
+	title_backdrop.position = (view.position - logo.position) / fit
+	title_backdrop.size = view.size / fit
+
+	for menu: Control in [main_menu, lobby_menu]:
+		menu.set_anchors_preset(Control.PRESET_TOP_LEFT)
+		menu.custom_minimum_size.x = TITLE_MENU_WIDTH
+		menu.size = Vector2.ZERO   # shrink to fit its contents
+		menu.scale = Vector2(menu_scale, menu_scale)
+		menu.position = Vector2(menu_left, view.get_center().y - menu.size.y * menu_scale / 2)
+
+
+# Fills the Tutorial screen with one card per move (edit TUTORIAL_MOVES to change them)
+func _build_tutorial() -> void:
+	var card_style := StyleBoxFlat.new()
+	card_style.bg_color = Color(0, 0, 0, 0.35)
+	card_style.border_color = Color(0.95, 0.75, 0.35, 0.8)
+	card_style.set_border_width_all(2)
+	card_style.set_content_margin_all(8)
+
+	for move in TUTORIAL_MOVES:
+		var card := PanelContainer.new()
+		card.add_theme_stylebox_override("panel", card_style)
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override("separation", 12)
+		card.add_child(row)
+
+		var pic := TextureRect.new()
+		pic.texture = load("res://Assets/UI/Tutorial/%s.png" % move.pic)
+		pic.custom_minimum_size = Vector2(128, 64)   # pictures are 128x64, shown at exactly 1x so they stay crisp
+		pic.stretch_mode = TextureRect.STRETCH_KEEP_CENTERED
+		pic.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		row.add_child(pic)
+
+		var text := VBoxContainer.new()
+		text.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		text.add_theme_constant_override("separation", 2)
+		row.add_child(text)
+		text.add_child(_tutorial_label(move.name, FONT_BOLD, Color(1, 0.85, 0.4)))
+		text.add_child(_tutorial_label(move.keys, FONT, Color(0.55, 0.85, 1)))
+		text.add_child(_tutorial_label(move.info, FONT, Color(0.92, 0.92, 0.92)))
+
+		tutorial_list.add_child(card)
+
+
+func _tutorial_label(text: String, font: Font, color: Color) -> Label:
+	var label := Label.new()
+	label.text = text
+	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	label.add_theme_font_override("font", font)
+	label.add_theme_font_size_override("font_size", 16)
+	label.add_theme_color_override("font_color", color)
+	return label
+
+
+func _on_tutorial_button_pressed() -> void:
+	main_menu.hide()
+	tutorial_menu.show()
+
+
+func _on_tutorial_back_pressed() -> void:
+	tutorial_menu.hide()
+	main_menu.show()
 
 
 func _use_live_server() -> bool:
@@ -387,6 +593,7 @@ func _on_server_disconnected() -> void:
 @rpc("authority", "reliable")
 func update_lobby(player_ids: Array, host_id: int, names: Dictionary) -> void:
 	main_menu.hide()
+	$SirCrumbs.hide()   # the title logo is only for the main menu
 	lobby_menu.show()
 	lobby_code_box.text = current_code
 
@@ -416,10 +623,22 @@ func update_lobby(player_ids: Array, host_id: int, names: Dictionary) -> void:
 @rpc("authority", "reliable")
 func on_game_started(names: Dictionary) -> void:
 	lobby_menu.hide()
+	_set_menu_mood(false)
+	player_names = names
+	scores.clear()
 	for id in names:
 		var player := get_node_or_null(str(id))
 		if player:
 			player.get_node("Label").text = names[id]
+
+
+# Menu music and the menu Light: on in the menus, off once the match starts
+func _set_menu_mood(in_menu: bool) -> void:
+	$SirCrumbs.visible = in_menu
+	if in_menu and not $TheSongsOfWar.playing:
+		$TheSongsOfWar.play()
+	elif not in_menu:
+		$TheSongsOfWar.stop()
 
 
 func _on_copy_button_pressed() -> void:
@@ -463,6 +682,10 @@ func _return_to_menu(message: String) -> void:
 		if child.scene_file_path == Player.resource_path:
 			child.queue_free()
 	$Camera2D.make_current()
+	scores.clear()
+	player_names.clear()
+	leaderboard.hide()
+	_set_menu_mood(true)
 	lobby_menu.hide()
 	main_menu.show()
 	host_button.disabled = false

@@ -30,12 +30,12 @@ var smash_charging := false
 var smash_start_time := 0.0
 var swish_charging := false
 var swish_start_time := 0.0
-var SWISH_MANA_COST = 50
+var SWISH_MANA_COST = 25
 var SWISH_DISTANCE = 120.0     # how far the Swish teleport carries you (pixels)
 var SWISH_WINDUP = 0.5         # how long you stand still before teleporting (seconds)
 var SWISH_HIT_RADIUS = 14.0    # players this close to the teleport's path get hit
 var IMPACT_FRAME_TIME = 0.12   # how long the black-and-white impact frame shows (seconds)
-var IMPACT_FRAME_ATTACKS = ["Swish", "Smash"]   # landing a hit with these shows the impact frame
+var IMPACT_FRAME_ATTACKS = ["Swish", "Smash", "SpinAttack"]   # landing a hit with these shows the impact frame
 var impact_frame: ColorRect    # full-screen overlay, only exists for our own player
 
 var move_map = {
@@ -80,6 +80,9 @@ var defending := false
 var lunging := false
 var blocking := false
 var lunge_direction := Vector2.ZERO
+var spin_charging := false
+var spin_start_time := 0.0
+var SPIN_MANA_COST = 25       # mana the Spin Attack costs
 
 # charge tracking for hold-to-lunge
 var charging := false
@@ -113,8 +116,9 @@ var DAMAGE = {
 	"Slash": 10,
 	"Thrust": 5,
 	"Stab": 20,    # the lunge
-	"Smash": 30,
-	"Swish": 50,
+	"Smash": 40,
+	"Swish": 30,
+	"SpinAttack": 25,   # hold Space
 }
 
 # aim is frozen from the moment a move fires until its animation finishes
@@ -136,6 +140,7 @@ var KNOCKBACK = {
 	"Stab": 400.0,    # the lunge
 	"Smash": 600.0,
 	"Swish": 0.0,    # goes straight through, no push
+	"SpinAttack": 350.0,
 }
 var KNOCKBACK_FRICTION = 1200.0   # how quickly a push slows down; higher = shorter slide
 var knockback_velocity := Vector2.ZERO
@@ -143,6 +148,12 @@ var current_attack := ""          # animation name of the attack we're doing rig
 var hit_this_attack: Array[int] = []   # players already hit by the current attack (each can only be hit once)
 var hitnumber_start: Vector2           # where the damage number sits before it floats up
 var vfx_offset: Vector2                # where the crack VFX sits when aiming right (from the scene)
+var sprite_rest_pos: Vector2           # where the body sprite normally sits (the death effect floats it up)
+var death_tween: Tween
+var DEATH_BEAM_DROP_TIME = 0.5         # how long the beam takes to come down (seconds)
+var DEATH_RISE_TIME = 4.0              # how long you float up the beam (seconds)
+var DEATH_RISE_HEIGHT = 150.0          # how far you float up (pixels)
+var DEATH_BEAM_FEET_Y = 16.0           # where the bottom of the beam lands, below the player's centre (pixels)
 # Each sound's normal pitch (1.0 = as recorded; lower = slower and deeper). Sounds not listed use 1.0
 var SFX_BASE_PITCH = {
 	"Walking": 0.75,
@@ -161,11 +172,17 @@ func is_local_player() -> bool:
 
 
 func _ready() -> void:
+	$Attack.global_position = Vector2(0,0)
+	$Shield.global_position = Vector2(0,0)
+	$CollisionShape2D.visible = true
+	sprite.visible = true
+	$CollisionShape2D.disabled = false
 	healthbar.value = health
 	manabar.value = mana
 	hitnumber_start = hitnumber.position
 	hitnumber.text = ""
 	vfx_offset = $VFX.position
+	sprite_rest_pos = sprite.position
 	# Cape colour picked from the peer id, so every screen gives this player the same colour
 	var cape := ShaderMaterial.new()
 	cape.shader = CAPE_SHADER
@@ -323,6 +340,17 @@ func handle_attack_input() -> void:
 			register_move("Swish", false, anim_player.get_animation("Swish").length)
 	if Input.is_action_just_released("Swish"):
 		swish_charging = false
+
+	# Spin Attack: hold Space, hits all around you
+	if Input.is_action_just_pressed("Spin"):
+		spin_charging = true
+		spin_start_time = now
+	if spin_charging and Input.is_action_pressed("Spin") and now - spin_start_time >= HOLD_DURATION:
+		spin_charging = false
+		if can_act() and spend_mana(SPIN_MANA_COST):
+			register_move("Spin Attack", false, anim_player.get_animation("SpinAttack").length)
+	if Input.is_action_just_released("Spin"):
+		spin_charging = false
 
 	if Input.is_action_just_pressed("attack"):
 		if combo_timer.time_left > 0:
@@ -509,6 +537,8 @@ func anim_for_move(move_name: String) -> String:
 			return "Stab"
 		"Smash", "Thrust", "Swish":
 			return move_name
+		"Spin Attack":
+			return "SpinAttack"
 	return "Slash"
 
 
@@ -634,6 +664,8 @@ func recieve_damage(hit_pos: Vector2, knockback: Vector2, damage: int) -> void:
 	shake_camera.rpc()
 	
 	if health <= 0:
+		# Tell everyone's leaderboard who got the kill (the sender of this hit) and who died
+		get_parent().record_kill.rpc(multiplayer.get_remote_sender_id(), str(name).to_int())
 		die()
 	update_low_health_effect()
 
@@ -641,21 +673,29 @@ func recieve_damage(hit_pos: Vector2, knockback: Vector2, damage: int) -> void:
 # ---------------- Death, spectating and respawning (runs in the dead player's own game) ----------------
 
 func die() -> void:
+	$SFX/Heaven.play()
 	health = 0
 	knockback_velocity = Vector2.ZERO
 	velocity = Vector2.ZERO
 	charging = false
 	smash_charging = false
 	swish_charging = false
+	spin_charging = false
 	if blocking:
 		stop_block()
 	set_dead_state.rpc(true, global_position)
 	$DeadTime.start()
-	dead_screen.visible = true
-	spectate(0)
+	# Watch our own death effect before switching to the death screen
+	await get_tree().create_timer(DEATH_BEAM_DROP_TIME + DEATH_RISE_TIME + 0.5).timeout
+	if dead:
+		dead_screen.visible = true
+		spectate(0)
 
 
 func respawn() -> void:
+	$CollisionShape2D.visible = true
+	sprite.visible = true
+	$CollisionShape2D.disabled = false
 	var spawn_points: Array = get_parent().get_node("SpawnPoints").get_children()
 	var spawn_pos: Vector2 = spawn_points.pick_random().global_position
 	health = MAX_HEALTH
@@ -671,11 +711,51 @@ func respawn() -> void:
 @rpc("call_local")
 func set_dead_state(is_dead: bool, pos: Vector2) -> void:
 	dead = is_dead
-	visible = not is_dead
 	global_position = pos
 	$CollisionShape2D.set_deferred("disabled", is_dead)
-	if not is_dead:
+	if is_dead:
+		play_death_effect()
+	else:
+		reset_death_effect()
+		visible = true
 		play_spawn_vfx()
+
+
+# The beam comes down, we float up it and fade away, then the beam fades and we're gone
+func play_death_effect() -> void:
+	var beam_height: float = $VFX.sprite_frames.get_frame_texture(&"Death", 0).get_height()
+	var beam_rest := Vector2(0, DEATH_BEAM_FEET_Y - beam_height / 2.0)   # beam's bottom at our feet
+	$VFX.animation = &"Death"
+	$VFX.rotation = 0
+	$VFX.flip_h = false
+	$VFX.position = beam_rest - Vector2(0, beam_height)   # start a whole beam-length higher up
+	$VFX.modulate.a = 0.0
+	$VFX.visible = true
+	$Label.visible = false
+
+	if death_tween:
+		death_tween.kill()
+	death_tween = create_tween().set_parallel(true)
+	# 1. beam drops down and fades in
+	death_tween.tween_property($VFX, "position", beam_rest, DEATH_BEAM_DROP_TIME).set_ease(Tween.EASE_OUT)
+	death_tween.tween_property($VFX, "modulate:a", 1.0, DEATH_BEAM_DROP_TIME)
+	# 2. float up the beam, slowly at first, fading away
+	death_tween.chain().tween_property(sprite, "position:y", sprite_rest_pos.y - DEATH_RISE_HEIGHT, DEATH_RISE_TIME).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN)
+	death_tween.tween_property(sprite, "modulate:a", 0.0, DEATH_RISE_TIME).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	# 3. beam fades out, then we're fully gone
+	death_tween.chain().tween_property($VFX, "modulate:a", 0.0, 0.5)
+	death_tween.chain().tween_callback(func(): if dead: visible = false)
+
+
+# Puts everything the death effect changed back to normal
+func reset_death_effect() -> void:
+	if death_tween:
+		death_tween.kill()
+	sprite.position = sprite_rest_pos
+	sprite.modulate.a = 1.0
+	$VFX.modulate.a = 1.0
+	$VFX.visible = false
+	$Label.visible = true
 
 
 func play_spawn_vfx() -> void:
@@ -771,6 +851,7 @@ func show_hit_number(damage: int) -> void:
 	hitnumber.rotation_degrees = randf_range(-10, 10)
 	hitnumber.position = hitnumber_start
 	hitnumber.modulate.a = 1.0
+	hitnumber.visible = true   # hidden in the scene until the first hit
 	var target := hitnumber_start + Vector2(randf_range(-5, 5), -15)   # up and a little sideways
 	tween.tween_property(hitnumber, "position", target, 0.5).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	tween.tween_property(hitnumber, "modulate:a", 0.0, 0.5).set_delay(0.2)

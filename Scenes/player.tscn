@@ -27,11 +27,13 @@
 [ext_resource type="Texture2D" uid="uid://c34fxr2s4xgpb" path="res://Assets/Player/SpawnIn.png" id="21_83xs0"]
 [ext_resource type="AudioStream" uid="uid://vux06cx7l0i1" path="res://Assets/SFX/u_3x9ga8wevj-walking-sound-effect-272246.mp3" id="21_olqyp"]
 [ext_resource type="AudioStream" uid="uid://bbwwnhe53ls0v" path="res://Assets/SFX/driken5482-retro-hurt-2-236675.mp3" id="22_bi64h"]
+[ext_resource type="Texture2D" uid="uid://m0oxmglvx4n0" path="res://Assets/Attacks/Death-Sheet.png" id="22_nv4vc"]
 [ext_resource type="AudioStream" uid="uid://buyfn55fe3j3l" path="res://Assets/SFX/freesound_gamestudio-rpg-sword-attack-combo-30-388949.mp3" id="23_2ijsl"]
 [ext_resource type="AudioStream" uid="uid://dcd8ukw15dem2" path="res://Assets/SFX/yodguard-short-energy-beam-shot-1-482495.mp3" id="30_ypfnu"]
 [ext_resource type="AudioStream" uid="uid://col6vtxlklky5" path="res://Assets/SFX/Shield.mp3" id="31_xuaoq"]
 [ext_resource type="AudioStream" uid="uid://cuwhg2e1g253c" path="res://Assets/SFX/Lunge.mp3" id="32_36dho"]
-[ext_resource type="AudioStream" uid="uid://ds6111dvr2f8r" path="res://Assets/SFX/yodguard-short-energy-beam-shot-4-482500.mp3" id="34_yh6i2"]
+[ext_resource type="AudioStream" uid="uid://ds6111dvr2f8r" path="res://Assets/SFX/yodguard-short-energy-beam-shot-4-482500.mp3" id="35_8gxox"]
+[ext_resource type="AudioStream" uid="uid://bbocjm22r3a1i" path="res://Assets/SFX/Heaven.mp3" id="35_nv4vc"]
 [ext_resource type="Texture2D" uid="uid://d0o5bgjyft8qc" path="res://Assets/UI/fillforhealth_cropped.png" id="fill_health_cropped"]
 [ext_resource type="Texture2D" uid="uid://7ehfva24h5ft" path="res://Assets/UI/ManaBarfill_cropped.png" id="fill_mana_cropped"]
 
@@ -722,6 +724,10 @@ region = Rect2(0, 400, 150, 50)
 atlas = ExtResource("14_qqcod")
 region = Rect2(0, 450, 150, 50)
 
+[sub_resource type="AtlasTexture" id="AtlasTexture_aclic"]
+atlas = ExtResource("22_nv4vc")
+region = Rect2(0, 0, 50, 300)
+
 [sub_resource type="AtlasTexture" id="AtlasTexture_wcnj3"]
 atlas = ExtResource("21_83xs0")
 region = Rect2(0, 0, 50, 300)
@@ -802,6 +808,14 @@ animations = [{
 "loop": 1,
 "name": &"Crack",
 "speed": 5.0
+}, {
+"frames": [{
+"duration": 1.0,
+"texture": SubResource("AtlasTexture_aclic")
+}],
+"loop": 1,
+"name": &"Death",
+"speed": 10.0
 }, {
 "frames": [{
 "duration": 1.0,
@@ -1382,6 +1396,102 @@ tracks/23/keys = {
 "transitions": PackedFloat32Array(1),
 "update": 1,
 "values": [&"Crack"]
+}
+tracks/24/type = "value"
+tracks/24/imported = false
+tracks/24/enabled = true
+tracks/24/path = NodePath("VFX:scale")
+tracks/24/interp = 1
+tracks/24/loop_wrap = true
+tracks/24/keys = {
+"times": PackedFloat32Array(0),
+"transitions": PackedFloat32Array(1),
+"update": 0,
+"values": [Vector2(1, 1)]
+}
+tracks/25/type = "value"
+tracks/25/imported = false
+tracks/25/enabled = true
+tracks/25/path = NodePath("SirCrumbsBottom:position")
+tracks/25/interp = 1
+tracks/25/loop_wrap = true
+tracks/25/keys = {
+"times": PackedFloat32Array(0),
+"transitions": PackedFloat32Array(1),
+"update": 0,
+"values": [Vector2(1.1920929e-07, 0.8161115)]
+}
+tracks/26/type = "value"
+tracks/26/imported = false
+tracks/26/enabled = true
+tracks/26/path = NodePath("CollisionShape2D:position")
+tracks/26/interp = 1
+tracks/26/loop_wrap = true
+tracks/26/keys = {
+"times": PackedFloat32Array(0),
+"transitions": PackedFloat32Array(1),
+"update": 0,
+"values": [Vector2(-0.6040037, 1.1432413)]
+}
+tracks/27/type = "value"
+tracks/27/imported = false
+tracks/27/enabled = true
+tracks/27/path = NodePath("Shield:position")
+tracks/27/interp = 1
+tracks/27/loop_wrap = true
+tracks/27/keys = {
+"times": PackedFloat32Array(0),
+"transitions": PackedFloat32Array(1),
+"update": 0,
+"values": [Vector2(0, 0)]
+}
+tracks/28/type = "value"
+tracks/28/imported = false
+tracks/28/enabled = true
+tracks/28/path = NodePath("SirCrumbsBottom:visible")
+tracks/28/interp = 1
+tracks/28/loop_wrap = true
+tracks/28/keys = {
+"times": PackedFloat32Array(0),
+"transitions": PackedFloat32Array(1),
+"update": 1,
+"values": [true]
+}
+tracks/29/type = "value"
+tracks/29/imported = false
+tracks/29/enabled = true
+tracks/29/path = NodePath("CollisionShape2D:visible")
+tracks/29/interp = 1
+tracks/29/loop_wrap = true
+tracks/29/keys = {
+"times": PackedFloat32Array(0),
+"transitions": PackedFloat32Array(1),
+"update": 1,
+"values": [true]
+}
+tracks/30/type = "value"
+tracks/30/imported = false
+tracks/30/enabled = true
+tracks/30/path = NodePath("Attack:position")
+tracks/30/interp = 1
+tracks/30/loop_wrap = true
+tracks/30/keys = {
+"times": PackedFloat32Array(0),
+"transitions": PackedFloat32Array(1),
+"update": 0,
+"values": [Vector2(0, 0)]
+}
+tracks/31/type = "value"
+tracks/31/imported = false
+tracks/31/enabled = true
+tracks/31/path = NodePath("CollisionShape2D:disabled")
+tracks/31/interp = 1
+tracks/31/loop_wrap = true
+tracks/31/keys = {
+"times": PackedFloat32Array(0),
+"transitions": PackedFloat32Array(1),
+"update": 1,
+"values": [false]
 }
 
 [sub_resource type="Animation" id="Animation_k53q1"]
@@ -2147,10 +2257,8 @@ streams_count = 1
 stream_0/stream = ExtResource("32_36dho")
 
 [sub_resource type="AudioStreamRandomizer" id="AudioStreamRandomizer_nv4vc"]
-random_pitch = 1.2599211
-random_volume_offset_db = 4.0
 streams_count = 1
-stream_0/stream = ExtResource("34_yh6i2")
+stream_0/stream = ExtResource("35_8gxox")
 
 [node name="Player" type="CharacterBody2D" unique_id=1183462702]
 y_sort_enabled = true
@@ -2229,12 +2337,13 @@ scale = Vector2(1.2774632, 1.2774632)
 shape = SubResource("RectangleShape2D_hvfyp")
 
 [node name="SirCrumbsBottom" type="AnimatedSprite2D" parent="." unique_id=1106352852]
-position = Vector2(1.1920929e-07, 0)
+position = Vector2(1.1920929e-07, 0.8161115)
 sprite_frames = SubResource("SpriteFrames_7jlj0")
 animation = &"rightanimated"
 
 [node name="Attack" type="AnimatedSprite2D" parent="." unique_id=1806658863]
 visible = false
+z_index = 1
 scale = Vector2(1.4, 1.4)
 sprite_frames = SubResource("SpriteFrames_l8h54")
 animation = &"SpinAttack"
@@ -2243,7 +2352,6 @@ animation = &"SpinAttack"
 visible = false
 z_index = 1
 position = Vector2(52.869812, 1.6891313)
-scale = Vector2(0.99999994, 0.99999994)
 sprite_frames = SubResource("SpriteFrames_bjdqd")
 animation = &"Crack"
 
@@ -2290,7 +2398,7 @@ one_shot = true
 one_shot = true
 
 [node name="DeadTime" type="Timer" parent="." unique_id=15638516]
-wait_time = 30.0
+wait_time = 15.0
 one_shot = true
 
 [node name="AnimationPlayer" type="AnimationPlayer" parent="." unique_id=1710474324]
@@ -2418,6 +2526,12 @@ max_distance = 300.0
 [node name="Swish" type="AudioStreamPlayer2D" parent="SFX" unique_id=2103210584]
 stream = SubResource("AudioStreamRandomizer_nv4vc")
 volume_db = -5.0
+max_distance = 300.0
+
+[node name="Heaven" type="AudioStreamPlayer2D" parent="SFX" unique_id=943980753]
+stream = ExtResource("35_nv4vc")
+volume_db = -10.0
+pitch_scale = 0.9
 max_distance = 300.0
 
 [node name="DeadScreen" type="CanvasLayer" parent="." unique_id=1348418508]
